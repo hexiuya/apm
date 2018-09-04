@@ -1,0 +1,7 @@
+cd E:/Xiuya/UAT/apm
+mvn clean install -Dmaven.test.skip=true
+docker stop apm
+docker rm apm
+docker image rm apm:0.0.1
+docker build . -t apm:0.0.1
+docker run -p 8116:8116 --name apm --network crm-network --network-alias alias-apm -d apm:0.0.1 
