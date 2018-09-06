@@ -11,15 +11,21 @@ import com.blackjade.apm.apis.CDCancel;
 import com.blackjade.apm.apis.CDCancelAns;
 import com.blackjade.apm.apis.CDeal;
 import com.blackjade.apm.apis.CDealAns;
+import com.blackjade.apm.apis.CDepositAcc;
+import com.blackjade.apm.apis.CDepositAccAns;
 import com.blackjade.apm.apis.CPCancel;
 import com.blackjade.apm.apis.CPCancelAns;
 import com.blackjade.apm.apis.CPayConfirm;
 import com.blackjade.apm.apis.CPayConfirmAns;
 import com.blackjade.apm.apis.CPublish;
 import com.blackjade.apm.apis.CPublishAns;
+import com.blackjade.apm.apis.CWithdrawAcc;
+import com.blackjade.apm.apis.CWithdrawAccAns;
 import com.blackjade.apm.apis.ComStatus;
 import com.blackjade.apm.dao.AccDao;
+import com.blackjade.apm.dao.OrdDao;
 import com.blackjade.apm.domain.AccRow;
+import com.blackjade.apm.domain.OrdRow;
 import com.blackjade.apm.exception.CapiException;
 
 @Transactional
@@ -30,15 +36,18 @@ public class ApmService {
 	private AccDao acc;
 	
 	@Autowired
+	private OrdDao ord;
+	
+	@Autowired
 	private RestTemplate rest;
 
 	private String url;
 
-	private String port;
+	//private String port;
 
 	@PostConstruct
 	public void apmInit() throws Exception {
-		this.port = "8112";
+		//this.port = "8112";
 		//this.url = "http://localhost:" + port;
 		this.url = "http://otc-pub/";
 		//this.rest = new RestTemplate();
@@ -525,6 +534,502 @@ public class ApmService {
 		}
 		
 		ans.setStatus(ComStatus.PCancelStatus.UNKNOWN);		
+		return ans;
+	}
+	
+	// deposit and withdraw
+	public CDepositAccAns depositAcc(CDepositAcc dp, CDepositAccAns ans) throws CapiException, Exception{
+
+		// first check inout order status
+		OrdRow ordrow = null;
+		try {
+			ordrow = this.ord.selectOrdRow(dp.getOid().toString(), dp.getClientid(), dp.getPnsgid(), dp.getPnsid(), "D");
+		}
+		catch(Exception e){
+			e.printStackTrace();
+			ans.setStatus(ComStatus.DepositAccStatus.MISS_ORD_DB);
+			return ans;
+		}
+		
+		// SUCCESS or FAILED status 
+		if(ComStatus.DepositOrdStatus.PROCEEDING!=dp.getConlvl()) {
+			if(ordrow == null) {
+				ans.setStatus(ComStatus.DepositAccStatus.MISS_ORD_DB);
+				return ans;
+			}
+			
+			if((ComStatus.DepositOrdStatus.SUCCESS!=dp.getConlvl())&&(ComStatus.DepositOrdStatus.FAILED!=dp.getConlvl())) {
+				ans.setStatus(ComStatus.DepositAccStatus.WRONG_ORD_STATUS);
+				return ans;
+			}
+			
+			// check ordstatus and quant with database
+			try {
+				// check status
+				if(ComStatus.DepositOrdStatus.PROCEEDING!=ComStatus.DepositOrdStatus.valueOf(ordrow.getStatus())) {
+					ans.setStatus(ComStatus.DepositAccStatus.WRONG_ORD_STATUS);
+					return ans;
+				}
+				
+				// check quant
+				if(ordrow.getQuant()!= dp.getQuant()) {
+					ans.setStatus(ComStatus.DepositAccStatus.WRONG_ORD_QUANT);
+					return ans;
+				}
+								
+			}catch(Exception e) {
+				ans.setStatus(ComStatus.DepositAccStatus.WRONG_ORD_STATUS);
+				return ans;
+			}			
+			
+			// #### update ordstatus ###
+			
+			// proceeding -> success			
+			if(ComStatus.DepositOrdStatus.SUCCESS==dp.getConlvl()) {				
+				ordrow.setStatus(ComStatus.DepositOrdStatus.SUCCESS.toString());
+				int cv = 0;
+				try {
+					cv = this.ord.updateDepositOrdRow(ordrow);
+					if(cv==0) {
+						ans.setStatus(ComStatus.DepositAccStatus.MISS_ORD_DB);
+						return ans;
+					}
+				}
+				catch(Exception e) {
+					e.printStackTrace();
+					ans.setStatus(ComStatus.DepositAccStatus.MISS_ORD_DB);
+					return ans;
+				}
+			}
+			
+			// proceeding -> failed
+			if(ComStatus.DepositOrdStatus.FAILED==dp.getConlvl()) {
+				ordrow.setStatus(ComStatus.DepositOrdStatus.FAILED.toString());
+				int cv = 0;
+				try{
+					cv = this.ord.updateDepositOrdRow(ordrow);
+					if(cv==0) {
+						ans.setStatus(ComStatus.DepositAccStatus.MISS_ORD_DB);
+						return ans;
+					}
+				}
+				catch(Exception e) {
+					e.printStackTrace();
+					ans.setStatus(ComStatus.DepositAccStatus.MISS_ORD_DB);
+					return ans;
+				}
+			}
+			
+		}
+		else // PROCEEDING STATUS
+		{
+			if(ordrow!=null) {
+				ans.setStatus(ComStatus.DepositAccStatus.WRONG_ORD_STATUS);
+				return ans;
+			}
+			
+			ordrow = new OrdRow();
+			ordrow.setTimestamp(System.currentTimeMillis());
+			ordrow.setOid(dp.getOid().toString());
+			ordrow.setCid(dp.getClientid());
+			ordrow.setSide('D');
+			ordrow.setPnsgid(dp.getPnsgid());
+			ordrow.setPnsid(dp.getPnsid());
+			ordrow.setQuant(dp.getQuant());
+			ordrow.setTranid(dp.getTranid());
+			ordrow.setStatus(dp.getConlvl().toString());
+			
+			int cv = 0;
+			// insert order into inout row
+			try {
+				cv = this.ord.insertOrdRow(ordrow);
+				if(cv==0) {
+					ans.setStatus(ComStatus.DepositAccStatus.MISS_ORD_DB);
+					return ans;
+				}
+			}
+			catch(Exception e) {
+				e.printStackTrace();
+				return ans;
+			}
+		}
+		
+		// #### update ACC row ####
+		// select ACC row 
+		AccRow accrow = null;
+		
+		// lock APM
+		try {
+			accrow = this.acc.selectAccRow(dp.getClientid(), dp.getPnsgid(), dp.getPnsid());
+			if (accrow == null) {
+				ans.setStatus(ComStatus.DepositAccStatus.MISS_ACC_DB);
+				return ans;
+			}
+		} catch (Exception e) {
+			e.printStackTrace();
+			ans.setStatus(ComStatus.DepositAccStatus.MISS_ACC_DB_EX);
+			return ans;
+		}
+				
+		long margin = accrow.getMargin();
+		long freemargin = accrow.getFreemargin(); 
+		long balan = accrow.getBalance();
+		long change = accrow.getChangebalan();
+		long quant = dp.getQuant();
+				
+		// status deposit initialize // update ACC
+		if(ComStatus.DepositOrdStatus.PROCEEDING == dp.getConlvl()) {
+			int cv = 0;
+			accrow.setBalance(balan+quant);
+			accrow.setMargin(margin+quant);
+			accrow.setChangebalan(change+quant);
+			
+			try {
+				//## update acc row
+				cv = this.acc.updateDepositAccRow(accrow);
+				if(cv==0) {
+					ans.setStatus(ComStatus.DepositAccStatus.MISS_ACC_DB);
+					return ans;
+				}
+			}
+			catch(Exception e) {
+				e.printStackTrace();
+				ans.setStatus(ComStatus.DepositAccStatus.MISS_ACC_DB_EX);
+				return ans;
+			}
+			
+			ans.setStatus(ComStatus.DepositAccStatus.SUCCESS);
+			return ans;
+		}
+		
+		// status success 
+		if(ComStatus.DepositOrdStatus.SUCCESS == dp.getConlvl()) {
+			int cv=0;
+			accrow.setMargin(margin-quant); // more check need to be added
+			accrow.setFreemargin(freemargin+quant);
+			
+			try {
+				// only success using confirm
+				cv = this.acc.updateDepositAccRowConfirm(accrow);
+				if(cv==0) {
+					ans.setStatus(ComStatus.DepositAccStatus.MISS_ACC_DB);
+					return ans;
+				}
+			}
+			catch(Exception e) {
+				e.printStackTrace();
+				ans.setStatus(ComStatus.DepositAccStatus.MISS_ACC_DB_EX);
+				return ans;
+			}
+			
+			ans.setStatus(ComStatus.DepositAccStatus.SUCCESS);
+			return ans;
+		}
+		
+		// status failed
+		if(ComStatus.DepositOrdStatus.FAILED == dp.getConlvl()) {
+			
+			int cv = 0;
+			accrow.setBalance(balan-quant); 	// more checks need to be added
+			accrow.setMargin(margin-quant);		// add lock bit to check
+			accrow.setChangebalan(change-quant);// more checks need to be added
+			
+			try {
+				//## update acc row
+				cv = this.acc.updateDepositAccRow(accrow);
+				if(cv==0) {
+					ans.setStatus(ComStatus.DepositAccStatus.MISS_ACC_DB);
+					return ans;
+				}
+			}
+			catch(Exception e) {
+				e.printStackTrace();
+				ans.setStatus(ComStatus.DepositAccStatus.MISS_ACC_DB_EX);
+				return ans;
+			}
+			
+			ans.setStatus(ComStatus.DepositAccStatus.SUCCESS);
+			return ans;
+		}		
+		
+		ans.setStatus(ComStatus.DepositAccStatus.UNKNOWN);
+		return ans;
+	}
+	
+	public CWithdrawAccAns withdrawAcc(CWithdrawAcc wd ,CWithdrawAccAns ans) throws CapiException, Exception{
+		
+		// first check inout order status		
+		OrdRow ordrow = null;
+		try {
+			ordrow = this.ord.selectOrdRow(wd.getOid().toString(), wd.getClientid(), wd.getPnsgid(), wd.getPnsid(), "W");
+		}
+		catch(Exception e) {
+			e.printStackTrace();
+			ans.setStatus(ComStatus.WithdrawAccStatus.MISS_ORD_DB);
+			return ans;
+		}
+		//# ORD UPDATE #
+		// SUCCESS or FAILED
+		if(ComStatus.WithdrawOrdStatus.PROCEEDING!=wd.getConlvl()) {
+			if(ordrow==null) {
+				ans.setStatus(ComStatus.WithdrawAccStatus.MISS_ORD_DB);				
+				return ans;
+			}
+			
+			if((ComStatus.WithdrawOrdStatus.SUCCESS!=wd.getConlvl())&&(ComStatus.WithdrawOrdStatus.FAILED!=wd.getConlvl())) {
+				ans.setStatus(ComStatus.WithdrawAccStatus.WRONG_ORD_STATUS);
+				return ans;
+			}
+			
+			// check ord db ordstatus and quant with database
+			try {
+				// check status
+				if(ComStatus.WithdrawOrdStatus.PROCEEDING!=ComStatus.WithdrawOrdStatus.valueOf(ordrow.getStatus())) {
+					ans.setStatus(ComStatus.WithdrawAccStatus.WRONG_ORD_STATUS);
+					return ans;
+				}
+				
+				// check quant
+				if(ordrow.getQuant()!=wd.getQuant()) {
+					ans.setStatus(ComStatus.WithdrawAccStatus.WRONG_ORD_QUANT);
+					return ans;
+				}
+								
+			}catch(Exception e) {
+				ans.setStatus(ComStatus.WithdrawAccStatus.WRONG_ORD_STATUS);
+				return ans;
+			}
+			
+			// update order status
+			
+			// PROCEEDING -> SUCCESS
+			if(ComStatus.WithdrawOrdStatus.SUCCESS==wd.getConlvl()) {				
+				ordrow.setStatus(ComStatus.WithdrawOrdStatus.SUCCESS.toString());				
+				int cv=0;
+				try {
+					cv = this.ord.updateWithdrawOrdRow(ordrow);
+					if(cv==0) 
+					{
+						ans.setStatus(ComStatus.WithdrawAccStatus.MISS_ORD_DB);
+						return ans;						
+					}
+				}
+				catch(Exception e) {
+					e.printStackTrace();
+					ans.setStatus(ComStatus.WithdrawAccStatus.MISS_ORD_DB);
+					return ans;	
+				}	
+			}
+			
+			// PROCEEDING -> FAILED
+			if(ComStatus.WithdrawOrdStatus.FAILED==wd.getConlvl()) {
+				ordrow.setStatus(ComStatus.WithdrawOrdStatus.FAILED.toString());
+				try {
+					int cv=0;
+					cv = this.ord.updateWithdrawOrdRow(ordrow);
+					if(cv==0){
+						ans.setStatus(ComStatus.WithdrawAccStatus.MISS_ORD_DB);
+						return ans;
+					}
+				}
+				catch(Exception e) {
+					e.printStackTrace();
+					ans.setStatus(ComStatus.WithdrawAccStatus.MISS_ORD_DB);
+					return ans;
+				}
+			}
+			
+			
+		}
+		else // PROCEEDING // need to check if ACC has enough 
+		{
+			if(ordrow!=null) {
+				ans.setStatus(ComStatus.WithdrawAccStatus.WRONG_ORD_STATUS);
+				return ans;
+			}
+			
+			ordrow = new OrdRow();
+			ordrow.setTimestamp(System.currentTimeMillis());
+			ordrow.setCid(wd.getClientid());
+			ordrow.setOid(wd.getOid().toString());
+			ordrow.setSide('W');
+			ordrow.setPnsgid(wd.getPnsgid());
+			ordrow.setPnsid(wd.getPnsid());
+			ordrow.setQuant(wd.getQuant());
+			ordrow.setTranid(wd.getTranid());
+			ordrow.setStatus(wd.getConlvl().toString());
+			
+			int cv = 0;
+			// insert order into inout row
+			try {
+				// this need to be done after or changed to be after
+				cv = this.ord.insertOrdRow(ordrow);///*************//bug//
+				if(cv==0) {
+					ans.setStatus(ComStatus.WithdrawAccStatus.MISS_ORD_DB);
+					return ans;
+				}
+			}
+			catch(Exception e) {
+				e.printStackTrace();
+				return ans;
+			}
+		}
+					
+		//# ACC UPDATE # // select ACC row //
+		// #### update ACC row ####
+		// select ACC row 
+		AccRow accrow = null;
+				
+		// lock APM
+		try {
+			accrow = this.acc.selectAccRow(wd.getClientid(), wd.getPnsgid(), wd.getPnsid());
+			if (accrow == null) {
+				ans.setStatus(ComStatus.WithdrawAccStatus.MISS_ACC_DB);
+				return ans;
+			}
+			
+		} catch (Exception e) {
+			e.printStackTrace();
+			ans.setStatus(ComStatus.WithdrawAccStatus.MISS_ACC_DB_EX);
+			return ans;
+		}
+						
+		long margin = accrow.getMargin();
+		long freemargin = accrow.getFreemargin(); 
+		long balan = accrow.getBalance();
+		long change = accrow.getChangebalan();
+		long quant = wd.getQuant();
+		
+		// CHECK IF WITHDRAW VALID
+		if((quant<=0)||(freemargin<0)) {
+			int cv=0;
+			ordrow.setStatus(ComStatus.WithdrawOrdStatus.UNKNOWN.toString());
+			try {
+				//cv = this.ord.insertOrdRow(ordrow); //
+				cv = this.ord.updateWithdrawOrdRow(ordrow);
+				if(cv==0) {
+					// should be exception instead
+					ans.setStatus(ComStatus.WithdrawAccStatus.MISS_ORD_DB);
+					return ans;
+				}
+			}catch(Exception e) {
+				e.printStackTrace();
+				ans.setStatus(ComStatus.WithdrawAccStatus.MISS_ACC_DB_EX);
+				return ans;
+			}			
+			ans.setStatus(ComStatus.WithdrawAccStatus.UNKNOWN);
+			return ans;
+		}
+		
+		if(quant>freemargin) {
+			int cv = 0;
+			ordrow.setStatus(ComStatus.WithdrawOrdStatus.REJECT.toString());
+			try {
+				//cv = this.ord.insertOrdRow(ordrow); // - //
+				cv = this.ord.updateWithdrawOrdRow(ordrow);
+				if(cv==0) {
+					// should be exception instead
+					ans.setStatus(ComStatus.WithdrawAccStatus.MISS_ORD_DB);
+					return ans;
+				}
+			}catch(Exception e) {
+				e.printStackTrace();
+				ans.setStatus(ComStatus.WithdrawAccStatus.MISS_ACC_DB_EX);
+				return ans;
+			}
+			ans.setStatus(ComStatus.WithdrawAccStatus.WRONG_ORD_QUANT);
+			return ans;
+		}
+		
+		// status withdraw initialize // update ACC
+		if(ComStatus.WithdrawOrdStatus.PROCEEDING == wd.getConlvl()) {
+			int cv = 0;
+			accrow.setMargin(margin+quant);
+			accrow.setFreemargin(freemargin-quant);
+			
+			try {
+				//## update acc row ##
+				cv = this.acc.updateWithdrawAccRow(accrow);// margin/freemargin
+				if(cv==0) {
+					ans.setStatus(ComStatus.WithdrawAccStatus.MISS_ACC_DB);
+					return ans;
+				}
+			}
+			catch(Exception e) {
+				e.printStackTrace();
+				ans.setStatus(ComStatus.WithdrawAccStatus.MISS_ACC_DB_EX);
+				return ans;
+			}
+					
+			ans.setStatus(ComStatus.WithdrawAccStatus.SUCCESS);
+			return ans;
+		}
+				
+		// status success 
+		if(ComStatus.WithdrawOrdStatus.SUCCESS == wd.getConlvl()) {
+			// check validation
+			if(margin<quant) {				
+				ans.setStatus(ComStatus.WithdrawAccStatus.UNKNOWN);
+				return ans;
+			}
+			
+			int cv=0;			
+			
+			accrow.setBalance(balan-quant);
+			accrow.setMargin(margin-quant); // more check need to be added
+			accrow.setChangebalan(change-quant);
+					
+			try {
+				// only success using confirm
+				cv = this.acc.updateWithdrawAccRowConfirm(accrow);
+				if(cv==0) {
+					ans.setStatus(ComStatus.WithdrawAccStatus.MISS_ACC_DB);
+					return ans;
+				}
+			}
+			catch(Exception e) {
+				e.printStackTrace();
+				ans.setStatus(ComStatus.WithdrawAccStatus.MISS_ACC_DB_EX);
+				return ans;
+			}
+					
+			ans.setStatus(ComStatus.WithdrawAccStatus.SUCCESS);
+			return ans;
+		}
+				
+		// status failed
+		if(ComStatus.WithdrawOrdStatus.FAILED == wd.getConlvl()) {
+					
+			// check validation
+			if(margin<quant) {
+				ans.setStatus(ComStatus.WithdrawAccStatus.UNKNOWN);
+				return ans;
+			}
+			
+			int cv = 0;
+			
+			accrow.setMargin(margin-quant);			// add lock bit to check
+			accrow.setFreemargin(freemargin+quant);
+						
+			try {
+				//## update acc row
+				cv = this.acc.updateWithdrawAccRow(accrow);
+				if(cv==0) {
+					ans.setStatus(ComStatus.WithdrawAccStatus.MISS_ACC_DB);
+					return ans;
+				}
+			}
+			catch(Exception e) {
+				e.printStackTrace();
+				ans.setStatus(ComStatus.WithdrawAccStatus.MISS_ACC_DB_EX);
+				return ans;
+			}
+					
+			ans.setStatus(ComStatus.WithdrawAccStatus.SUCCESS);
+			return ans;
+		}		
+				
+		ans.setStatus(ComStatus.WithdrawAccStatus.UNKNOWN);	
 		return ans;
 	}
 }
