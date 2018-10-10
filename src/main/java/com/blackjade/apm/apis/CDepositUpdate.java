@@ -2,46 +2,36 @@ package com.blackjade.apm.apis;
 
 import java.util.UUID;
 
+import com.blackjade.apm.apis.ComStatus;
 import com.blackjade.apm.apis.ComStatus.DepositAccStatus;
 import com.blackjade.apm.apis.ComStatus.DepositOrdStatus;
 
-//cDepositAcc	0x7103	{requestid, clientid, pnsid, pnsgid}	HTTP
+//X CRMC/CNET/APM	cDepositUpdate	
+//0x4003 {requestid, clientid, pnsid, pnsgid, quant, fees, rcvquant, transactionid, conlvl}	HTTP
 
-public class CDepositAcc {
-
-	private String messageid;
+public class CDepositUpdate {
 	private UUID requestid;
+	private String messageid;
 	private int clientid;
 	private UUID oid;
 	private int pnsid;
 	private int pnsgid;
 	private long quant;
-	private String tranid;
+	private long fees;
+	private long rcvquant;
+	private String transactionid;
 	private DepositOrdStatus conlvl;
 
 	public DepositAccStatus reviewData() {
 
-		if ((this.messageid==null)||(!this.messageid.equals("7103")))
-			return ComStatus.DepositAccStatus.WRONG_MSGID;
-
-		if (this.requestid == null)
+		if (!"4003".equals(messageid))
 			return ComStatus.DepositAccStatus.IN_MSG_ERR;
-
-		if (this.clientid <= 0)
+		if ((fees < 0) || (quant < 0) || (rcvquant < 0))
 			return ComStatus.DepositAccStatus.IN_MSG_ERR;
-
-		if (this.quant <= 0)
+		if (quant != (fees + rcvquant))
 			return ComStatus.DepositAccStatus.IN_MSG_ERR;
 
 		return ComStatus.DepositAccStatus.SUCCESS;
-	}
-
-	public String getMessageid() {
-		return messageid;
-	}
-
-	public void setMessageid(String messageid) {
-		this.messageid = messageid;
 	}
 
 	public UUID getRequestid() {
@@ -50,6 +40,14 @@ public class CDepositAcc {
 
 	public void setRequestid(UUID requestid) {
 		this.requestid = requestid;
+	}
+
+	public String getMessageid() {
+		return messageid;
+	}
+
+	public void setMessageid(String messageid) {
+		this.messageid = messageid;
 	}
 
 	public int getClientid() {
@@ -92,12 +90,28 @@ public class CDepositAcc {
 		this.quant = quant;
 	}
 
-	public String getTranid() {
-		return tranid;
+	public long getFees() {
+		return fees;
 	}
 
-	public void setTranid(String tranid) {
-		this.tranid = tranid;
+	public void setFees(long fees) {
+		this.fees = fees;
+	}
+
+	public long getRcvquant() {
+		return rcvquant;
+	}
+
+	public void setRcvquant(long rcvquant) {
+		this.rcvquant = rcvquant;
+	}
+
+	public String getTransactionid() {
+		return transactionid;
+	}
+
+	public void setTransactionid(String transactionid) {
+		this.transactionid = transactionid;
 	}
 
 	public DepositOrdStatus getConlvl() {
@@ -110,9 +124,10 @@ public class CDepositAcc {
 
 	@Override
 	public String toString() {
-		return "CDepositAcc [messageid=" + messageid + ", requestid=" + requestid + ", clientid=" + clientid + ", oid="
-				+ oid + ", pnsid=" + pnsid + ", pnsgid=" + pnsgid + ", quant=" + quant + ", tranid=" + tranid
-				+ ", conlvl=" + conlvl + "]";
+		return "CDepositUpdate [requestid=" + requestid.toString() + ", messageid=" + messageid + ", clientid=" + clientid
+				+ ", oid=" + oid.toString() + ", pnsid=" + pnsid + ", pnsgid=" + pnsgid + ", quant=" + quant + ", fees=" + fees
+				+ ", rcvquant=" + rcvquant + ", transactionid=" + transactionid + ", conlvl=" + conlvl + "]";
 	}
 
 }
+
